@@ -645,6 +645,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     MetricsLogger mLogger;
     boolean mWakeOnDpadKeyPress;
     boolean mWakeOnAssistKeyPress;
+    boolean mAssistCameraShutter;
+    boolean mAssistCameraShutterPressed;
     boolean mWakeOnBackKeyPress;
     boolean mSilenceRingerOnSleepKey;
     long mWakeUpToLastStateTimeout;
@@ -1086,6 +1088,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     UserHandle.USER_ALL);
             resolver.registerContentObserver(LineageSettings.System.getUriFor(
                     LineageSettings.System.ASSIST_WAKE_SCREEN), false, this,
+                    UserHandle.USER_ALL);
+            resolver.registerContentObserver(LineageSettings.System.getUriFor(
+                    LineageSettings.System.ASSIST_CAMERA_SHUTTER), false, this,
                     UserHandle.USER_ALL);
             resolver.registerContentObserver(LineageSettings.System.getUriFor(
                     LineageSettings.System.APP_SWITCH_WAKE_SCREEN), false, this,
@@ -3521,6 +3526,11 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             mWakeOnAssistKeyPress = (LineageSettings.System.getIntForUser(resolver,
                     LineageSettings.System.ASSIST_WAKE_SCREEN, 0, UserHandle.USER_CURRENT) == 1)
                     && ((mDeviceHardwareWakeKeys & KEY_MASK_ASSIST) != 0);
+            mAssistCameraShutter = LineageSettings.System.getIntForUser(resolver,
+                    LineageSettings.System.ASSIST_CAMERA_SHUTTER, 0, UserHandle.USER_CURRENT) == 1;
+            if (!mAssistCameraShutter) {
+                mAssistCameraShutterPressed = false;
+            }
             mWakeOnAppSwitchKeyPress = (LineageSettings.System.getIntForUser(resolver,
                     LineageSettings.System.APP_SWITCH_WAKE_SCREEN, 0, UserHandle.USER_CURRENT) == 1)
                     && ((mDeviceHardwareWakeKeys & KEY_MASK_APP_SWITCH) != 0);
@@ -5204,6 +5214,11 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         final boolean isDefaultDisplayOn = Display.isOnState(mDefaultDisplay.getState());
         final boolean isDefaultDisplayAwake = mDefaultDisplayPolicy.isAwake();
         final boolean interactiveAndAwake = interactive && isDefaultDisplayAwake;
+        if (handleAssistCameraShutter(event)) {
+            mSingleKeyGestureDetector.reset();
+            return result & ~ACTION_PASS_TO_USER;
+        }
+
         if (isKeyGestureTriggered) {
             // If key gesture is triggered outside policy, reset gesture handlers here
             mSingleKeyGestureDetector.reset();
@@ -5740,6 +5755,29 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         }
 
         return result;
+    }
+
+    private boolean handleAssistCameraShutter(KeyEvent event) {
+        if (!mAssistCameraShutter || event.getKeyCode() != KeyEvent.KEYCODE_ASSIST) {
+            return false;
+        }
+
+        final boolean down = event.getAction() == KeyEvent.ACTION_DOWN;
+        if (down && event.getRepeatCount() == 0
+                && mCameraAvailabilityListener.isAnyCameraInUse()) {
+            mAssistCameraShutterPressed = true;
+            triggerVirtualKeypress(KeyEvent.KEYCODE_CAMERA);
+            return true;
+        }
+
+        if (mAssistCameraShutterPressed) {
+            if (!down) {
+                mAssistCameraShutterPressed = false;
+            }
+            return true;
+        }
+
+        return false;
     }
 
     private void handleKeyGesture(KeyEvent event, boolean interactive, boolean defaultDisplayOn) {
