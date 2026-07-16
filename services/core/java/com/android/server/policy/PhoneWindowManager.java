@@ -136,6 +136,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.ProgressDialog;
 import android.app.SearchManager;
+import android.app.contextualsearch.ContextualSearchManager;
 import android.app.UiModeManager;
 import android.bluetooth.BluetoothProfile;
 import android.content.ActivityNotFoundException;
@@ -2341,6 +2342,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 launchAssistAction(null, event.getDeviceId(), event.getDisplayId(),
                        event.getEventTime(), assistInvocationType);
                 notifyKeyGestureCompleted(event, KeyGestureEvent.KEY_GESTURE_TYPE_LAUNCH_ASSISTANT);
+                break;
+            case CONTEXTUAL_SEARCH:
+                launchContextualSearchAction();
                 break;
             case VOICE_SEARCH:
                 launchVoiceAssist(mAllowStartActivityForLongPressOnPowerDuringSetup);
@@ -6052,6 +6056,24 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     void dispatchMediaKeyWithWakeLockToAudioService(KeyEvent event) {
         if (mActivityManagerInternal.isSystemReady()) {
             MediaSessionLegacyHelper.getHelper(mContext).sendMediaButtonEvent(event, true);
+        }
+    }
+
+    void launchContextualSearchAction() {
+        sendCloseSystemWindows(SYSTEM_DIALOG_REASON_ASSIST);
+
+        final ContextualSearchManager contextualSearchManager =
+                mContext.getSystemService(ContextualSearchManager.class);
+        if (contextualSearchManager == null) {
+            Log.w(TAG, "Contextual search service unavailable");
+            return;
+        }
+
+        try {
+            contextualSearchManager.startContextualSearch(
+                    ContextualSearchManager.ENTRYPOINT_SYSTEM_ACTION);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Unable to start contextual search", e);
         }
     }
 
