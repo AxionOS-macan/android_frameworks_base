@@ -4615,6 +4615,11 @@
   <java-symbol type="string" name="bluetooth_airplane_mode_toast" />
 
   <!-- For high refresh rate displays -->
+  <java-symbol type="integer" name="config_axDynamicMaxRefreshRate" />
+  <java-symbol type="integer" name="config_axDynamicLowRefreshRate" />
+  <java-symbol type="integer" name="config_axInteractiveRefreshRate" />
+  <java-symbol type="array" name="config_axDynamicFullRangePackages" />
+  <java-symbol type="array" name="config_axDynamicLowRefreshPackages" />
   <java-symbol type="integer" name="config_defaultRefreshRate" />
   <java-symbol type="integer" name="config_defaultPeakRefreshRate" />
   <java-symbol type="integer" name="config_externalDisplayPeakRefreshRate" />

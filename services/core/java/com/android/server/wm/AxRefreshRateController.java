@@ -16,6 +16,8 @@
 package com.android.server.wm;
 
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
+import android.content.res.Resources;
 import android.database.ContentObserver;
 import android.hardware.display.DisplayManager;
 import android.net.Uri;
@@ -27,12 +29,14 @@ import android.os.SystemProperties;
 import android.os.UserHandle;
 import android.provider.Settings;
 import android.util.ArrayMap;
+import android.util.ArraySet;
 import android.util.Slog;
 import android.util.SparseArray;
 import android.view.Display;
 import android.view.DisplayInfo;
 import android.view.MotionEvent;
 
+import com.android.internal.R;
 import com.android.internal.annotations.GuardedBy;
 import com.android.server.DisplayThread;
 
@@ -74,12 +78,14 @@ public class AxRefreshRateController {
         MINIMUM,
         MAXIMUM,
         FIXED,
+        DYNAMIC_FULL_RANGE,
         DYNAMIC_CONTENT
     }
 
     private static final class ManagedDisplay {
         String focusedPackage = "";
         float appOverrideRate;
+        boolean usesFullDynamicRange;
         boolean visible = true;
         float lastSyncedPeak = -1f;
         float lastSyncedMin = -1f;
@@ -95,6 +101,9 @@ public class AxRefreshRateController {
     private static final float RATE_EQUALITY_TOLERANCE_HZ = 0.01f;
     private static final float RATE_MATCH_TOLERANCE_HZ = 1.0f;
     private static final float KEYGUARD_REFRESH_RATE_HZ = 60f;
+    private static final int DEFAULT_DYNAMIC_MAX_REFRESH_RATE_HZ = 120;
+    private static final int DEFAULT_DYNAMIC_LOW_REFRESH_RATE_HZ = 90;
+    private static final int DEFAULT_INTERACTIVE_REFRESH_RATE_HZ = 120;
 
     private static final AxRefreshRateController sInstance = new AxRefreshRateController();
 
@@ -112,10 +121,16 @@ public class AxRefreshRateController {
 
     private volatile float mMaxSupportedHz = 60f;
     private volatile float mDefaultMinHz = 60f;
+    private volatile float mGlobalMaxHz = 60f;
+    private volatile float mDynamicLowMaxHz = 60f;
+    private volatile float mInteractiveRefreshRateHz = 60f;
     private volatile float mKeyguardRefreshRateHz = KEYGUARD_REFRESH_RATE_HZ;
     private volatile float[] mSupportedRefreshRates = {KEYGUARD_REFRESH_RATE_HZ};
 
     private float[] mConfiguredRefreshRates = new float[0];
+    private int mConfiguredDynamicMaxRefreshRateHz = DEFAULT_DYNAMIC_MAX_REFRESH_RATE_HZ;
+    private int mConfiguredDynamicLowRefreshRateHz = DEFAULT_DYNAMIC_LOW_REFRESH_RATE_HZ;
+    private int mConfiguredInteractiveRefreshRateHz = DEFAULT_INTERACTIVE_REFRESH_RATE_HZ;
 
     private volatile RefreshRateMode mRefreshRateMode = RefreshRateMode.MAXIMUM;
     private volatile int mRefreshRateSetting = 60;
@@ -145,6 +160,9 @@ public class AxRefreshRateController {
 
     @GuardedBy("mUserAppRefreshRates")
     private final ArrayMap<String, Float> mUserAppRefreshRates = new ArrayMap<>();
+
+    private final ArraySet<String> mDynamicFullRangePackages = new ArraySet<>();
+    private final ArraySet<String> mDynamicLowRefreshPackages = new ArraySet<>();
 
     private final Runnable mSyncAndTraversalRunnable = this::syncAndRequestTraversal;
     private final Runnable mIdleTimeoutRunnable = this::syncAndRequestTraversal;
@@ -187,6 +205,7 @@ public class AxRefreshRateController {
         mFocusBoostTimeoutMs = SystemProperties.getLong(
                 "persist.sys.ax.focus_boost_timeout_ms", 5000);
 
+        loadDynamicRefreshRateConfig();
         parseCustomRefreshRateList();
         queryAndApplyDisplayModes();
         loadRefreshRateSetting();
@@ -225,7 +244,7 @@ public class AxRefreshRateController {
             activeDisplayChanged = setActiveDisplayLocked(displayId, eventTimeNanos);
             appOverrideActive = display.appOverrideRate > 0f;
         }
-        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+        if (action == MotionEvent.ACTION_CANCEL) {
             if (clearInteractionBoosts() || activeDisplayChanged) {
                 postSyncAtFront();
             }
@@ -237,14 +256,22 @@ public class AxRefreshRateController {
             }
             return;
         }
-        if (appOverrideActive) {
+        // A per-app rate should continue to win for app gestures, but SystemUI is an
+        // overlay and does not become the focused app while the shade is open. Let
+        // shade gestures create an interactive vote so QS remains smooth even over
+        // an app that is explicitly limited to a lower refresh rate.
+        if (appOverrideActive && !mNotificationShadeExpanded) {
             if (activeDisplayChanged) {
                 postSyncAtFront();
             }
             return;
         }
         clearBoost(Boost.FOCUS);
-        if (setBoost(Boost.TOUCH) || activeDisplayChanged) {
+        final boolean touchBoostAdded = setBoost(Boost.TOUCH);
+        if (touchBoostAdded || activeDisplayChanged
+                || action == MotionEvent.ACTION_DOWN
+                || action == MotionEvent.ACTION_MOVE
+                || action == MotionEvent.ACTION_UP) {
             postSyncAtFront();
         }
     }
@@ -338,8 +365,8 @@ public class AxRefreshRateController {
                 if (displayContent == null) {
                     return;
                 }
-                focusedPackage = displayContent.mFocusedApp == null
-                        || displayContent.mFocusedApp.packageName == null
+                final ActivityRecord focusedApp = displayContent.mFocusedApp;
+                focusedPackage = focusedApp == null || focusedApp.packageName == null
                         ? "" : displayContent.mFocusedApp.packageName;
                 visible = !Display.isOffState(displayContent.getDisplayInfo().state);
                 synchronized (mDisplayLock) {
@@ -348,6 +375,7 @@ public class AxRefreshRateController {
                     }
                     final ManagedDisplay display = new ManagedDisplay();
                     display.focusedPackage = focusedPackage;
+                    display.usesFullDynamicRange = usesFullDynamicRange(focusedApp);
                     display.visible = visible;
                     updateFocusedAppOverrideLocked(display);
                     mManagedDisplays.put(displayId, display);
@@ -448,6 +476,7 @@ public class AxRefreshRateController {
                 setActiveDisplayLocked(displayId, focusChangeTimeNanos);
             }
             display.focusedPackage = packageName;
+            display.usesFullDynamicRange = usesFullDynamicRange(activityRecord);
             updateFocusedAppOverrideLocked(display);
             if (isDynamicMode() && !packageName.isEmpty() && mActiveDisplayId == displayId
                     && display.appOverrideRate <= 0f && mKeyguardDone) {
@@ -455,6 +484,28 @@ public class AxRefreshRateController {
             }
         }
         postSyncAtFront();
+    }
+
+    private boolean usesFullDynamicRange(ActivityRecord activityRecord) {
+        if (activityRecord == null) {
+            return false;
+        }
+        final String packageName = activityRecord.packageName;
+        if (packageName != null && mDynamicLowRefreshPackages.contains(packageName)) {
+            return false;
+        }
+        if (activityRecord.isActivityTypeHome()) {
+            return true;
+        }
+        if (packageName != null && mDynamicFullRangePackages.contains(packageName)) {
+            return true;
+        }
+        if (activityRecord.info == null || activityRecord.info.applicationInfo == null) {
+            return false;
+        }
+        final ApplicationInfo appInfo = activityRecord.info.applicationInfo;
+        return appInfo.category == ApplicationInfo.CATEGORY_GAME
+                || (appInfo.flags & ApplicationInfo.FLAG_IS_GAME) != 0;
     }
 
     public void onDisplayChanged(int displayId) {
@@ -499,6 +550,7 @@ public class AxRefreshRateController {
                     boosted && policyDisplayId == mActiveDisplayId);
             switch (policy) {
                 case DYNAMIC_CONTENT:
+                case DYNAMIC_FULL_RANGE:
                     return;
                 case KEYGUARD:
                 case APP:
@@ -731,6 +783,40 @@ public class AxRefreshRateController {
         mCurrentVoteMax = 0f;
     }
 
+    private void loadDynamicRefreshRateConfig() {
+        final Resources res = mContext.getResources();
+        mConfiguredDynamicMaxRefreshRateHz = getPositiveIntegerConfig(res,
+                R.integer.config_axDynamicMaxRefreshRate, DEFAULT_DYNAMIC_MAX_REFRESH_RATE_HZ);
+        mConfiguredDynamicLowRefreshRateHz = getPositiveIntegerConfig(res,
+                R.integer.config_axDynamicLowRefreshRate, DEFAULT_DYNAMIC_LOW_REFRESH_RATE_HZ);
+        mConfiguredInteractiveRefreshRateHz = getPositiveIntegerConfig(res,
+                R.integer.config_axInteractiveRefreshRate, DEFAULT_INTERACTIVE_REFRESH_RATE_HZ);
+
+        mDynamicFullRangePackages.clear();
+        addPackages(mDynamicFullRangePackages,
+                res.getStringArray(R.array.config_axDynamicFullRangePackages));
+        mDynamicLowRefreshPackages.clear();
+        addPackages(mDynamicLowRefreshPackages,
+                res.getStringArray(R.array.config_axDynamicLowRefreshPackages));
+    }
+
+    private static int getPositiveIntegerConfig(Resources res, int resId, int defaultValue) {
+        final int value = res.getInteger(resId);
+        return value > 0 ? value : defaultValue;
+    }
+
+    private static void addPackages(ArraySet<String> out, String[] packages) {
+        for (String packageName : packages) {
+            if (packageName == null) {
+                continue;
+            }
+            packageName = packageName.trim();
+            if (!packageName.isEmpty()) {
+                out.add(packageName);
+            }
+        }
+    }
+
     private void parseCustomRefreshRateList() {
         final String customList = SystemProperties.get(
                 "persist.sys.display_refresh_rates_list", "");
@@ -811,10 +897,17 @@ public class AxRefreshRateController {
 
         final float[] rates = toFloatArray(supportedRates);
         final float keyguardRefreshRate = findKeyguardRefreshRate(actualRates);
+        final float interactiveRefreshRate = findInteractiveRefreshRate(rates);
+        final float globalMaxRefreshRate = findGlobalMaxRefreshRate(rates, interactiveRefreshRate);
+        final float dynamicLowMaxRefreshRate = findDynamicLowMaxRefreshRate(
+                rates, globalMaxRefreshRate);
         synchronized (mDisplayLock) {
             mSupportedRefreshRates = rates;
             mDefaultMinHz = rates[0];
             mMaxSupportedHz = rates[rates.length - 1];
+            mGlobalMaxHz = globalMaxRefreshRate;
+            mDynamicLowMaxHz = dynamicLowMaxRefreshRate;
+            mInteractiveRefreshRateHz = interactiveRefreshRate;
             mKeyguardRefreshRateHz = keyguardRefreshRate;
         }
     }
@@ -827,15 +920,20 @@ public class AxRefreshRateController {
         if (!mKeyguardDone && sNeedsHfrFlickerFix && !(isDynamicMode() && boosted)) {
             return Policy.KEYGUARD;
         }
-        if (displayId == Display.DEFAULT_DISPLAY && isDynamicMode()
-                && mNotificationShadeExpanded) {
-            return Policy.MAXIMUM;
-        }
         if (!mKeyguardDone) {
             return resolveModePolicy(boosted);
         }
+        if (displayId == Display.DEFAULT_DISPLAY && mNotificationShadeExpanded && boosted) {
+            return Policy.INTERACTIVE;
+        }
         if (display.appOverrideRate > 0f) {
             return Policy.APP;
+        }
+        if (isDynamicMode()) {
+            if (display.usesFullDynamicRange) {
+                return boosted ? Policy.INTERACTIVE : Policy.DYNAMIC_FULL_RANGE;
+            }
+            return Policy.DYNAMIC_CONTENT;
         }
         return resolveModePolicy(boosted);
     }
@@ -863,6 +961,7 @@ public class AxRefreshRateController {
             case KEYGUARD:
                 return mKeyguardRefreshRateHz;
             case INTERACTIVE:
+                return mInteractiveRefreshRateHz;
             case MAXIMUM:
                 return mMaxSupportedHz;
             case APP:
@@ -872,6 +971,7 @@ public class AxRefreshRateController {
             case FIXED:
                 return resolveSelectedRefreshRate();
             case DYNAMIC_CONTENT:
+            case DYNAMIC_FULL_RANGE:
                 break;
         }
         throw new IllegalStateException("Policy does not lock a refresh rate: " + policy);
@@ -917,9 +1017,10 @@ public class AxRefreshRateController {
             }
             policy = resolvePolicyLocked(displayId, policyDisplay,
                     boosted && policyDisplayId == mActiveDisplayId);
-            if (policy == Policy.DYNAMIC_CONTENT) {
+            if (policy == Policy.DYNAMIC_CONTENT || policy == Policy.DYNAMIC_FULL_RANGE) {
                 min = 0f;
-                peak = mMaxSupportedHz;
+                peak = policy == Policy.DYNAMIC_FULL_RANGE
+                        ? mGlobalMaxHz : mDynamicLowMaxHz;
             } else {
                 final float rate = resolvePolicyRateLocked(policy, policyDisplay);
                 min = rate;
@@ -947,6 +1048,7 @@ public class AxRefreshRateController {
             case MAXIMUM:
             case FIXED:
             case DYNAMIC_CONTENT:
+            case DYNAMIC_FULL_RANGE:
                 return false;
         }
         throw new IllegalStateException("Unknown refresh rate policy " + policy);
@@ -962,7 +1064,7 @@ public class AxRefreshRateController {
 
     private void loadRefreshRateSetting() {
         final int value = Settings.Global.getInt(mContext.getContentResolver(),
-                SETTINGS_REFRESH_RATE_MODE, sSupportsVrr ? 0 : Math.round(mMaxSupportedHz));
+                SETTINGS_REFRESH_RATE_MODE, sSupportsVrr ? 0 : Math.round(mGlobalMaxHz));
         applyRefreshRateMode(value);
         mLockscreenLimitEnabled = Settings.System.getIntForUser(mContext.getContentResolver(),
                 LOCKSCREEN_LIMIT_REFRESH_RATE, 0, UserHandle.USER_CURRENT) != 0;
@@ -998,11 +1100,11 @@ public class AxRefreshRateController {
 
     private float resolveSelectedRefreshRate() {
         if (mRefreshRateSetting <= 0) {
-            return mMaxSupportedHz;
+            return mGlobalMaxHz;
         }
         final float rate = findSupportedRefreshRate(
                 mRefreshRateSetting, RATE_MATCH_TOLERANCE_HZ);
-        return rate > 0f ? rate : mMaxSupportedHz;
+        return rate > 0f ? rate : mGlobalMaxHz;
     }
 
     private void loadPerAppRefreshRates() {
@@ -1114,6 +1216,62 @@ public class AxRefreshRateController {
             }
         }
         return closestDistance <= tolerance ? closestRate : 0f;
+    }
+
+    private float findGlobalMaxRefreshRate(float[] rates, float fallbackRate) {
+        final int configuredRate = SystemProperties.getInt(
+                "persist.sys.ax.global_max_refresh_rate",
+                mConfiguredDynamicMaxRefreshRateHz);
+        if (configuredRate <= 0) {
+            return rates[rates.length - 1];
+        }
+        float globalMaxRate = 0f;
+        for (float rate : rates) {
+            if (rate <= configuredRate + RATE_MATCH_TOLERANCE_HZ) {
+                globalMaxRate = rate;
+            }
+        }
+        if (globalMaxRate > 0f) {
+            return globalMaxRate;
+        }
+        return fallbackRate > 0f ? fallbackRate : rates[rates.length - 1];
+    }
+
+    private float findDynamicLowMaxRefreshRate(float[] rates, float globalMaxRate) {
+        final int configuredRate = SystemProperties.getInt(
+                "persist.sys.ax.dynamic_low_refresh_rate",
+                mConfiguredDynamicLowRefreshRateHz);
+        if (configuredRate <= 0) {
+            return globalMaxRate;
+        }
+        final float maxAllowedRate = Math.min(configuredRate, globalMaxRate);
+        float dynamicLowMaxRate = 0f;
+        for (float rate : rates) {
+            if (rate <= maxAllowedRate + RATE_MATCH_TOLERANCE_HZ) {
+                dynamicLowMaxRate = rate;
+            }
+        }
+        return dynamicLowMaxRate > 0f ? dynamicLowMaxRate : rates[0];
+    }
+
+    private float findInteractiveRefreshRate(float[] rates) {
+        final float configuredRate = SystemProperties.getInt(
+                "persist.sys.ax.interactive_refresh_rate",
+                mConfiguredInteractiveRefreshRateHz);
+        if (configuredRate > 0) {
+            final float matchedRate = findClosestRefreshRate(
+                    rates, configuredRate, RATE_MATCH_TOLERANCE_HZ);
+            if (matchedRate > 0f) {
+                return matchedRate;
+            }
+        }
+        float interactiveRate = 0f;
+        for (float rate : rates) {
+            if (rate <= mConfiguredInteractiveRefreshRateHz + RATE_MATCH_TOLERANCE_HZ) {
+                interactiveRate = rate;
+            }
+        }
+        return interactiveRate > 0f ? interactiveRate : rates[rates.length - 1];
     }
 
     private static float findKeyguardRefreshRate(float[] rates) {

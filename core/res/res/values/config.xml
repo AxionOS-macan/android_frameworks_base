@@ -5854,6 +5854,14 @@
      and a second time clipped to the fill level to indicate charge -->
     <bool name="config_batterymeterDualTone">false</bool>
 
+    <!-- Axion dynamic refresh-rate policy. Dynamic mode can expose a full range and a
+         lower-power range; per-app/manual refresh-rate selections still use the panel list. -->
+    <integer name="config_axDynamicMaxRefreshRate">120</integer>
+    <integer name="config_axDynamicLowRefreshRate">90</integer>
+    <integer name="config_axInteractiveRefreshRate">120</integer>
+    <string-array name="config_axDynamicFullRangePackages" translatable="false" />
+    <string-array name="config_axDynamicLowRefreshPackages" translatable="false" />
+
     <!-- The default refresh rate for a given device. Change this value to set a higher default
          refresh rate. If the hardware composer on the device supports display modes with a higher
          refresh rate than the default value specified here, the framework may use those higher
