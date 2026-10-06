@@ -572,6 +572,8 @@ public class DisplayPolicy {
                                 Boost.INTERACTION, duration);
                     }
                     AxDragonite.getInstance().onSystemFling(duration + 160);
+                    AxRefreshRateController.getInstance().setFlingBoost(
+                            mDisplayContent.getDisplayId(), duration + 160L);
                 }
 
                 @Override
@@ -1457,6 +1459,9 @@ public class DisplayPolicy {
             mNavigationBar = null;
         } else if (mNotificationShade == win) {
             mNotificationShade = null;
+            if (mDisplayContent.isDefaultDisplay) {
+                AxRefreshRateController.getInstance().setNotificationShadeExpanded(false);
+            }
         }
         if (mLastFocusedWindow == win) {
             mLastFocusedWindow = null;

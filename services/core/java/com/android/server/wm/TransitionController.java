@@ -1431,6 +1431,7 @@ class TransitionController {
         final boolean animatingState = !mPlayingTransitions.isEmpty()
                     || (mCollectingTransition != null && mCollectingTransition.isStarted());
         if (animatingState && !mAnimatingState) {
+            AxRefreshRateController.getInstance().setAnimationBoost(DEFAULT_TIMEOUT_MS);
             // Note that Transition#start() can be called before adding participants, so the
             // enableHighPerfTransition(true) is also called in Transition#recordDisplay.
             for (int i = mAtm.mRootWindowContainer.getChildCount() - 1; i >= 0; i--) {
@@ -1452,6 +1453,7 @@ class TransitionController {
             mAnimatingState = true;
             Transition.asyncTraceBegin("animating", 0x41bfaf1 /* hashcode of TAG */);
         } else if (!animatingState && mAnimatingState) {
+            AxRefreshRateController.getInstance().clearAnimationBoost();
             for (int i = mAtm.mRootWindowContainer.getChildCount() - 1; i >= 0; i--) {
                 mAtm.mRootWindowContainer.getChildAt(i).enableHighPerfTransition(false);
             }

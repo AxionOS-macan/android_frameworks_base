@@ -43,6 +43,8 @@ public class PointerEventDispatcher extends InputEventReceiver {
                     && (event.getSource() & InputDevice.SOURCE_CLASS_POINTER) != 0) {
                 AxDragonite.getInstance().inputBoost();
                 MotionEvent motionEvent = (MotionEvent) event;
+                AxRefreshRateController.getInstance().onPointerEvent(
+                        motionEvent.getDisplayId(), motionEvent.getActionMasked());
                 PointerEventListener[] listeners;
                 synchronized (mListeners) {
                     if (mListenersArray == null) {
